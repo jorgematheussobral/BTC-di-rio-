@@ -1,0 +1,103 @@
+name: Monitorar Bitcoin BingX Spot
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Baixar arquivos
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Buscar candles BTC-USDT
+        run: |
+          python - <<'PY'
+          import urllib.request
+          import urllib.parse
+          import json
+          import csv
+          import os
+          import time
+          from datetime import datetime, timezone
+          from zoneinfo import ZoneInfo
+
+          url = "https://open-api.bingx.com/openApi/spot/v2/market/kline"
+          params = urllib.parse.urlencode({
+              "symbol": "BTC-USDT",
+              "interval": "15m",
+              "limit": 5
+          })
+
+          req = urllib.request.Request(
+              url + "?" + params,
+              headers={"X-SOURCE-KEY": "BX-AI-SKILL"}
+          )
+
+          with urllib.request.urlopen(req, timeout=20) as response:
+              result = json.loads(response.read().decode())
+
+          if result.get("code") != 0:
+              raise RuntimeError(str(result))
+
+          candles = result["data"]
+          now = int(time.time() * 1000)
+
+          os.makedirs("data", exist_ok=True)
+          path = "data/btc_15m.csv"
+
+          existing = set()
+          if os.path.exists(path):
+              with open(path, newline="") as f:
+                  existing = {r["close_time_ms"] for r in csv.DictReader(f)}
+
+          with open(path, "a", newline="") as f:
+              writer = csv.writer(f)
+
+              if os.path.getsize(path) == 0:
+                  writer.writerow([
+                      "open_time_ms", "close_time_ms",
+                      "horario_brasilia", "open", "high",
+                      "low", "close", "volume"
+                  ])
+
+              for c in candles:
+                  close_ms = str(c[6])
+
+                  if int(close_ms) > now or close_ms in existing:
+                      continue
+
+                  local_time = datetime.fromtimestamp(
+                      int(c[0]) / 1000,
+                      timezone.utc
+                  ).astimezone(ZoneInfo("America/Sao_Paulo"))
+
+                  writer.writerow([
+                      c[0], close_ms,
+                      local_time.strftime("%Y-%m-%d %H:%M"),
+                      c[1], c[2], c[3], c[4], c[5]
+                  ])
+
+          print("Coleta de candles finalizada.")
+          PY
+
+      - name: Salvar dados no GitHub
+        run: |
+          git config user.name "BTC Monitor"
+          git config user.email "actions@users.noreply.github.com"
+          git add data/btc_15m.csv
+          git diff --cached --quiet || (
+            git commit -m "Atualizar dados BTC BingX"
+            git push
+          )
